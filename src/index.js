@@ -145,6 +145,197 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
   }
 });
 
+// ===================
+// TASK ROUTES
+// ===================
+
+// GET /api/tasks/stats - Get task counts by status
+app.get('/api/tasks/stats', authMiddleware, async (req, res) => {
+  try {
+    const stats = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN status = 'todo' THEN 1 ELSE 0 END) as todo,
+          SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as inProgress,
+          SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done
+        FROM tasks WHERE user_id = ?`,
+        [req.user.id],
+        (err, row) => {
+          if (err) reject(err);
+          resolve(row);
+        }
+      );
+    });
+
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/tasks - Get all tasks for logged-in user
+app.get('/api/tasks', authMiddleware, async (req, res) => {
+  try {
+    const tasks = await new Promise((resolve, reject) => {
+      db.all(
+        'SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC',
+        [req.user.id],
+        (err, rows) => {
+          if (err) reject(err);
+          resolve(rows);
+        }
+      );
+    });
+
+    res.json({ success: true, data: tasks });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/tasks - Create new task
+app.post('/api/tasks', authMiddleware, async (req, res) => {
+  try {
+    const { title, description, status, priority, due_date } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ success: false, error: 'Title is required' });
+    }
+
+    const taskStatus = status || 'todo';
+    const taskPriority = priority || 'medium';
+
+    const result = await new Promise((resolve, reject) => {
+      db.run(
+        'INSERT INTO tasks (user_id, title, description, status, priority, due_date) VALUES (?, ?, ?, ?, ?, ?)',
+        [req.user.id, title, description || null, taskStatus, taskPriority, due_date || null],
+        function (err) {
+          if (err) reject(err);
+          resolve({ id: this.lastID });
+        }
+      );
+    });
+
+    // Fetch the created task
+    const task = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM tasks WHERE id = ?', [result.id], (err, row) => {
+        if (err) reject(err);
+        resolve(row);
+      });
+    });
+
+    res.status(201).json({ success: true, data: task });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PUT /api/tasks/:id - Update task
+app.put('/api/tasks/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, status, priority, due_date } = req.body;
+
+    // Check if task exists and belongs to user
+    const existingTask = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM tasks WHERE id = ? AND user_id = ?', [id, req.user.id], (err, row) => {
+        if (err) reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!existingTask) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+
+    if (title !== undefined) {
+      updates.push('title = ?');
+      values.push(title);
+    }
+    if (description !== undefined) {
+      updates.push('description = ?');
+      values.push(description);
+    }
+    if (status !== undefined) {
+      updates.push('status = ?');
+      values.push(status);
+    }
+    if (priority !== undefined) {
+      updates.push('priority = ?');
+      values.push(priority);
+    }
+    if (due_date !== undefined) {
+      updates.push('due_date = ?');
+      values.push(due_date);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(id, req.user.id);
+
+    await new Promise((resolve, reject) => {
+      db.run(
+        `UPDATE tasks SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`,
+        values,
+        function (err) {
+          if (err) reject(err);
+          resolve();
+        }
+      );
+    });
+
+    // Fetch updated task
+    const updatedTask = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM tasks WHERE id = ?', [id], (err, row) => {
+        if (err) reject(err);
+        resolve(row);
+      });
+    });
+
+    res.json({ success: true, data: updatedTask });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /api/tasks/:id - Delete task
+app.delete('/api/tasks/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if task exists and belongs to user
+    const existingTask = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM tasks WHERE id = ? AND user_id = ?', [id, req.user.id], (err, row) => {
+        if (err) reject(err);
+        resolve(row);
+      });
+    });
+
+    if (!existingTask) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    await new Promise((resolve, reject) => {
+      db.run('DELETE FROM tasks WHERE id = ? AND user_id = ?', [id, req.user.id], function (err) {
+        if (err) reject(err);
+        resolve();
+      });
+    });
+
+    res.json({ success: true, message: 'Task deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Task Manager API is running' });
